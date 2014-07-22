@@ -9,6 +9,8 @@ driver_libenigma_driver_a_SOURCES = \
 	driver/rc.cpp \
 	driver/rcinput.cpp \
 	driver/rfmod.cpp \
+	driver/rcinput.cpp \
+	driver/rcinput_lirc.cpp \
 	driver/hdmi_cec.cpp
 
 driverincludedir = $(pkgincludedir)/lib/driver
