@@ -67,7 +67,7 @@ class RecordingSettings(Setup):
 			green = ""
 		elif not self.isValidPartition(path):
 			self.errorItem = self["config"].getCurrentIndex()
-			footnote = _("Directory '%s' not valid. Partition must be ext or nfs") % path
+			footnote = _("Directory '%s' not valid. Partition must be ext, nfs or vfat") % path
 			green = ""
 		elif not fileExists(path, "w"):
 			self.errorItem = self["config"].getCurrentIndex()
@@ -82,7 +82,7 @@ class RecordingSettings(Setup):
 
 	def isValidPartition(self, path):
 		if path is not None:
-			supported_filesystems = ('ext4', 'ext3', 'ext2', 'nfs', 'cifs', 'ntfs')
+			supported_filesystems = ('ext4', 'ext3', 'ext2', 'nfs', 'cifs', 'ntfs', 'vfat')
 			valid_partitions = []
 			for partition in Components.Harddisk.harddiskmanager.getMountedPartitions():
 				if partition.filesystem() in supported_filesystems:
