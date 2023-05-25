@@ -1,6 +1,7 @@
 import sys
 from os.path import exists as osexists, isfile
 from time import time
+from datetime import datetime
 
 if isfile("/usr/lib/enigma2/python/enigma.zip"):
 	sys.path.append("/usr/lib/enigma2/python/enigma.zip")
@@ -142,7 +143,7 @@ from Plugins.Plugin import PluginDescriptor
 if config.misc.firstrun.value and not osexists('/etc/install'):
 	with open("/etc/install", "w") as f:
 		now = datetime.now()
-		flashdate = now.strftime("%Y-%m-%d")
+		flashdate = now.strftime("%Y%m%d")
 		print("[Setting Flash date]", flashdate)
 		f.write(flashdate)
 
