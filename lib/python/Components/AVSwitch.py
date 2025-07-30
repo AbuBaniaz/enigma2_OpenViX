@@ -504,9 +504,9 @@ def InitAVSwitch():
 					("10bit", _("10bit")),
 					("12bit", _("12bit"))]
 		default = "auto"
-		if BOXTYPE == "gbquad4kpro" and config.av.videomode[config.av.videoport.value].value == "2160p":
+		if SystemInfo["needsVideoJudderDriverFix"] and config.av.videomode[config.av.videoport.value].value == "2160p":
 			choices = [("10bit", "10bit"), ("12bit", "12bit")]
-			default = "10bit"
+			default = "12bit"
 		elif SystemInfo["havehdmicolordepthchoices"] and SystemInfo["CanProc"]:
 			f = "/proc/stb/video/hdmi_colordepth_choices"
 			(choices, default) = readChoices(f, choices, default)
@@ -894,3 +894,26 @@ def stopHotplug():
 
 def InitiVideomodeHotplug(**kwargs):
 	startHotplug()
+
+
+iVideoJudderDriverFixTask = None
+
+
+class VideoJudderDriverFixTask:
+	def __init__(self, session):
+		from enigma import iPlayableService
+		from Components.ServiceEventTracker import ServiceEventTracker
+		self.session = session
+		self.inited = False
+		self.__event_tracker = ServiceEventTracker(screen=self, eventmap={iPlayableService.evVideoFramerateChanged: self.__evVideoFramerateChanged})
+
+	def __evVideoFramerateChanged(self):
+		if not self.inited:
+			with open("/proc/stb/video/hdmi_colordepth", "w") as fd:
+				fd.write("10bit")
+			self.inited = True
+
+def startVideoJudderDriverFixTask(session):
+	global iVideoJudderDriverFixTask
+	if SystemInfo["needsVideoJudderDriverFix"]:
+		iVideoJudderDriverFixTask = VideoJudderDriverFixTask(session)
