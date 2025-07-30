@@ -913,6 +913,7 @@ class VideoJudderDriverFixTask:
 				fd.write("10bit")
 			self.inited = True
 
+
 def startVideoJudderDriverFixTask(session):
 	global iVideoJudderDriverFixTask
 	if SystemInfo["needsVideoJudderDriverFix"]:
