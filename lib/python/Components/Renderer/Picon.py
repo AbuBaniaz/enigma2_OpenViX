@@ -118,12 +118,6 @@ class PiconLocator:
 		print("[Picon] utf8_name", utf8_name)
 		yield utf8_name
 
-		legacy_name = self.LEGACY_RE.sub("", utf8_name.translate(self.LEGACY_TRANSLATION))
-		yield legacy_name
-
-		yield self.SUFFIX_RE.sub("", utf8_name).strip()    # utf8_no_suffix
-		yield self.SUFFIX_RE.sub("", legacy_name).strip()  # legacy_no_suffix
-
 	def getPiconName(self, serviceRef):
 		if not serviceRef:
 			return ""
