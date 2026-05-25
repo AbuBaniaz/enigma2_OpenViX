@@ -115,6 +115,7 @@ class PiconLocator:
 		utf8_name = sanitizeFilename(sname).lower()
 		if utf8_name == "__":  # sname sanitized was zero length
 			return
+		print("[Picon] utf8_name", utf8_name)
 		yield utf8_name
 
 		legacy_name = self.LEGACY_RE.sub("", utf8_name.translate(self.LEGACY_TRANSLATION))
