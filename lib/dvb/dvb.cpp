@@ -289,6 +289,27 @@ eDVBUsbAdapter::eDVBUsbAdapter(int nr)
 	virtualFrontendName = filename;
 
 	demuxFd = vtunerFd = pipeFd[0] = pipeFd[1] = -1;
+	usbFeFd = proxyFd = -1;
+	statusRunning = false;
+	statusThread = 0;
+
+	/*
+	 * GigaBlue BCM7252 style platform (also used by the Vu+ Duo 4K Lite): nexus.ko plus a
+	 * monolithic dvb.ko that contains its own vtuner implementation. That vtuner only passes
+	 * TS data once the proxy frontend has reported a status, see statusPoll().
+	 */
+	gbVtuner = (::access("/sys/module/nexus", F_OK) == 0 && ::access("/sys/module/dvb", F_OK) == 0);
+	if (gbVtuner)
+	{
+		/*
+		 * Reserve a file descriptor number below vtunerFd for the proxy frontend. On process
+		 * exit (including crashes) the kernel closes descriptors in ascending order. Closing
+		 * vtunerFd makes the driver unregister the proxy frontend, which blocks until every
+		 * handle on that frontend is closed; if our own proxy handle were closed after
+		 * vtunerFd, enigma2 would hang forever in exit.
+		 */
+		proxyFd = ::open("/dev/null", O_RDONLY | O_CLOEXEC);
+	}
 
 	/* find the device name */
 	snprintf(filename, sizeof(filename), "/sys/class/dvb/dvb%d.frontend0/device/product", nr);
@@ -385,6 +406,17 @@ eDVBUsbAdapter::eDVBUsbAdapter(int nr)
 
 	eDebug("[eDVBUsbAdapter] linking adapter%d/frontend0 to vtuner%d", nr, vtunerid);
 
+	if (proxyFd >= 0 && proxyFd > vtunerFd)
+	{
+		/* keep the reserved proxy descriptor below vtunerFd (see above) */
+		int fd = ::fcntl(vtunerFd, F_DUPFD_CLOEXEC, proxyFd + 1);
+		if (fd >= 0)
+		{
+			::close(vtunerFd);
+			vtunerFd = fd;
+		}
+	}
+
 	switch (fe_info.type)
 	{
 	case FE_QPSK:
@@ -435,7 +467,14 @@ eDVBUsbAdapter::eDVBUsbAdapter(int nr)
 	if (prop[0].u.buffer.len > 0)
 		ioctl(vtunerFd, VTUNER_SET_DELSYS, prop[0].u.buffer.data);
 	ioctl(vtunerFd, VTUNER_SET_HAS_OUTPUTS, "no");
-	ioctl(vtunerFd, VTUNER_SET_ADAPTER, nr);
+	/*
+	 * On the GigaBlue style vtuner a non-zero adapter number makes the driver inject empty
+	 * PID list messages from poll() whenever no PID is active, overwriting any pending
+	 * request (such as MSG_READ_STATUS) and leaving its caller waiting forever while holding
+	 * the vtuner lock. It also adds a 100 ms sleep to every write(). Leave it unset there.
+	 */
+	if (!gbVtuner)
+		ioctl(vtunerFd, VTUNER_SET_ADAPTER, nr);
 
 	memset(pidList, 0xff, sizeof(pidList));
 
@@ -447,9 +486,25 @@ eDVBUsbAdapter::eDVBUsbAdapter(int nr)
 	}
 	running = true;
 	pthread_create(&pumpThread, NULL, threadproc, (void*)this);
+
+	/* read-only handle on the real USB frontend, used to answer MSG_READ_STATUS */
+	if (gbVtuner)
+		usbFeFd = ::open(usbFrontendName.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+	if (usbFeFd >= 0 && proxyFd >= 0)
+	{
+		statusRunning = true;
+		pthread_create(&statusThread, NULL, statusThreadproc, (void*)this);
+	}
+	else if (gbVtuner)
+		eWarning("[eDVBUsbAdapter] cannot open %s read-only (%m), proxy status will not be reported", usbFrontendName.c_str());
 	return;
 
 error:
+	if (proxyFd >= 0)
+	{
+		::close(proxyFd);
+		proxyFd = -1;
+	}
 	if (vtunerFd >= 0)
 	{
 		close(vtunerFd);
@@ -464,6 +519,20 @@ error:
 
 eDVBUsbAdapter::~eDVBUsbAdapter()
 {
+	/* stop the status poller first, the pump must still be running to answer its last request */
+	statusRunning = false;
+	if (statusThread) pthread_join(statusThread, NULL);
+	if (usbFeFd >= 0)
+	{
+		::close(usbFeFd);
+		usbFeFd = -1;
+	}
+	/* the proxy frontend handle must be closed before vtunerFd, see the constructor */
+	if (proxyFd >= 0)
+	{
+		::close(proxyFd);
+		proxyFd = -1;
+	}
 	running = false;
 	if (pipeFd[1] >= 0)
 	{
@@ -494,6 +563,64 @@ void *eDVBUsbAdapter::threadproc(void *arg)
 	return user->vtunerPump();
 }
 
+void *eDVBUsbAdapter::statusThreadproc(void *arg)
+{
+	eDVBUsbAdapter *user = (eDVBUsbAdapter*)arg;
+	return user->statusPoll();
+}
+
+void *eDVBUsbAdapter::statusPoll()
+{
+	bool proxyOpen = false;
+	int lastErrno = 0;
+	while (statusRunning)
+	{
+		if (!proxyOpen)
+		{
+			/*
+			 * Open the proxy frontend read/write: that starts the dvb-core frontend thread,
+			 * which initialises the frontend's exit state. The driver allocates the proxy
+			 * frontend without zeroing it, so without this every frontend ioctl can fail with
+			 * ENODEV. Nobody else opens the proxy (enigma2 tunes the real USB frontend).
+			 * The node may appear slightly after VTUNER_SET_TYPE, hence the retry loop.
+			 */
+			int fd = ::open(virtualFrontendName.c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
+			if (fd < 0)
+				fd = ::open(virtualFrontendName.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+			if (fd >= 0)
+			{
+				/* move it onto the reserved low descriptor number */
+				if (::dup2(fd, proxyFd) >= 0)
+				{
+					proxyOpen = true;
+					eDebug("[eDVBUsbAdapter] polling proxy frontend %s for %s", virtualFrontendName.c_str(), usbFrontendName.c_str());
+				}
+				::close(fd);
+			}
+		}
+		if (proxyOpen)
+		{
+			fe_status_t status;
+			/* calls the proxy's read_status -> MSG_READ_STATUS -> answered in vtunerPump() */
+			if (::ioctl(proxyFd, FE_READ_STATUS, &status) < 0)
+			{
+				if (errno != lastErrno)
+				{
+					eWarning("[eDVBUsbAdapter] FE_READ_STATUS on proxy %s failed: %m", virtualFrontendName.c_str());
+					lastErrno = errno;
+				}
+			}
+			else if (lastErrno)
+			{
+				eDebug("[eDVBUsbAdapter] FE_READ_STATUS on proxy %s works again", virtualFrontendName.c_str());
+				lastErrno = 0;
+			}
+		}
+		usleep(250 * 1000);
+	}
+	return NULL;
+}
+
 static bool exist_in_pidlist(unsigned short int* pidlist, unsigned short int value)
 {
 	for (int i=0; i<30; ++i)
@@ -505,8 +632,10 @@ static bool exist_in_pidlist(unsigned short int* pidlist, unsigned short int val
 void *eDVBUsbAdapter::vtunerPump()
 {
 	int pidcount = 0;
+	int lastStatus = -1;
 	if (vtunerFd < 0 || demuxFd < 0 || pipeFd[0] < 0) return NULL;
 
+#define MSG_READ_STATUS      3
 #define MSG_PIDLIST         14
 	struct vtuner_message
 	{
@@ -535,7 +664,8 @@ void *eDVBUsbAdapter::vtunerPump()
 			{
 				struct vtuner_message message = {};
 				memset(message.pidlist, 0xff, sizeof(message.pidlist));
-				::ioctl(vtunerFd, VTUNER_GET_MESSAGE, &message);
+				if (::ioctl(vtunerFd, VTUNER_GET_MESSAGE, &message) < 0)
+					message.type = -1;
 
 				switch (message.type)
 				{
@@ -593,6 +723,38 @@ void *eDVBUsbAdapter::vtunerPump()
 					memcpy(pidList, message.pidlist, sizeof(message.pidlist));
 
 					break;
+				default:
+				{
+					/*
+					 * Every other request waits for a response; answer it so the driver never
+					 * blocks. MSG_READ_STATUS gets the real USB frontend status, which also
+					 * opens the driver's data gate when the USB tuner has a signal.
+					 */
+					struct
+					{
+						int type;
+						unsigned int status;
+						unsigned char pad[120];
+					} response = {};
+					if (message.type <= 0)
+						break;
+					response.type = message.type;
+					if (message.type == MSG_READ_STATUS && usbFeFd >= 0)
+					{
+						fe_status_t status = (fe_status_t)0;
+						if (::ioctl(usbFeFd, FE_READ_STATUS, &status) >= 0)
+							response.status = (unsigned int)status;
+						if ((int)response.status != lastStatus)
+						{
+							eDebug("[eDVBUsbAdapter] reporting status 0x%x of %s to vtuner", response.status, usbFrontendName.c_str());
+							lastStatus = (int)response.status;
+						}
+					}
+					else if (message.type != MSG_READ_STATUS)
+						eDebug("[eDVBUsbAdapter] answering vtuner request type %d", message.type);
+					::ioctl(vtunerFd, VTUNER_SET_RESPONSE, &response);
+					break;
+				}
 				}
 			}
 			if (FD_ISSET(demuxFd, &rset))

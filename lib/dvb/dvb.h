@@ -148,6 +148,20 @@ private:
 	pthread_t pumpThread;
 	static void *threadproc(void *arg);
 	void *vtunerPump();
+	/*
+	 * Some vtuner drivers (e.g. the GigaBlue/Broadcom 7252 dvb.ko) only pass TS data written to
+	 * the vtuner device on to the demux after the proxy frontend has reported a non-zero status
+	 * via MSG_READ_STATUS. Enigma2 tunes the real USB frontend directly, so nothing ever queries
+	 * the proxy frontend and all data is silently dropped. The status thread polls the proxy
+	 * frontend, and the pump answers the resulting request with the real USB frontend status.
+	 */
+	int usbFeFd;
+	int proxyFd;
+	bool gbVtuner;
+	bool statusRunning;
+	pthread_t statusThread;
+	static void *statusThreadproc(void *arg);
+	void *statusPoll();
 
 public:
 	eDVBUsbAdapter(int nr);
